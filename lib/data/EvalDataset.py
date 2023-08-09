@@ -2,6 +2,7 @@
 
 import os
 import random
+from pathlib import Path
 
 import numpy as np 
 from PIL import Image, ImageOps
@@ -12,6 +13,7 @@ import json
 
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
+
 
 def crop_image(img, rect):
     x, y, w, h = rect
@@ -32,6 +34,23 @@ def crop_image(img, rect):
 
     return new_img[y:(y+h),x:(x+w),:]
 
+
+def gen_rect_by_mask(mask_path: Path):
+    mask = np.array(Image.open(mask_path).convert('1'))
+    idy, idx = np.where(mask > 0)
+    x, y = np.min(idx), np.min(idy)
+    w, h = np.max(idx) - x, np.max(idy) - y
+
+    center_x, center_y = x + w // 2, y + h // 2
+    radius = round(max(w, h) / 2 * 1.3)
+    min_x = max(0, center_x - radius)
+    min_y = max(0, center_y - radius)
+    max_x = min(mask.shape[1], center_x + radius)
+    max_y = min(mask.shape[0], center_y + radius)
+
+    return min_x, min_y, max_x - min_x, max_y - min_y  # x, y, w, h
+
+
 class EvalDataset(Dataset):
     @staticmethod
     def modify_commandline_options(parser, is_train):
@@ -41,9 +60,34 @@ class EvalDataset(Dataset):
         self.opt = opt
         self.projection_mode = projection
 
-        self.root = self.opt.dataroot
-        self.img_files = sorted([os.path.join(self.root,f) for f in os.listdir(self.root) if f.split('.')[-1] in ['png', 'jpeg', 'jpg', 'PNG', 'JPG', 'JPEG'] and os.path.exists(os.path.join(self.root,f.replace('.%s' % (f.split('.')[-1]), '_rect.txt')))])
-        self.IMG = os.path.join(self.root)
+        root = Path(self.opt.dataroot)
+
+        if root.is_dir():
+            img_files = []
+            for ff in root.iterdir():
+                if (
+                    ff.suffix.lower() not in {'.png', '.jpeg', '.jpg'}
+                    or ff.stem.endswith('_mask')
+                ):
+                    continue
+
+                rect_path = ff.parent / (ff.stem + '_rect.txt')
+                if rect_path.exists():
+                    img_files.append(ff)
+                    continue
+
+                mask_path = ff.parent / (ff.stem + '_mask.png')
+                if not mask_path.exists():
+                    continue
+
+                # Parse rect by mask
+                x, y, w, h = gen_rect_by_mask(mask_path)
+                np.savetxt(rect_path, [[x, y, w, h]])
+                img_files.append(ff)
+
+            self.img_files = sorted(img_files)
+        else:
+            self.img_files = [root]
 
         self.phase = 'val'
         self.load_size = self.opt.loadSize
@@ -61,18 +105,18 @@ class EvalDataset(Dataset):
         return len(self.img_files)
 
     def get_n_person(self, index):
-        rect_path = self.img_files[index].replace('.%s' % (self.img_files[index].split('.')[-1]), '_rect.txt')
+        img_path: Path = self.img_files[index]
+        rect_path = img_path.parent / (img_path.stem + '_rect.txt')
         rects = np.loadtxt(rect_path, dtype=np.int32)
 
         return rects.shape[0] if len(rects.shape) == 2 else 1
 
     def get_item(self, index):
-        img_path = self.img_files[index]
-        rect_path = self.img_files[index].replace('.%s' % (self.img_files[index].split('.')[-1]), '_rect.txt')
-        # Name
-        img_name = os.path.splitext(os.path.basename(img_path))[0]
+        img_path: Path = self.img_files[index]
+        rect_path = img_path.parent / (img_path.stem + '_rect.txt')
 
-        im = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+        # im = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+        im = np.array(Image.open(img_path).convert('RGB'))
         if im.shape[2] == 4:
             im = im / 255.0
             im[:,:,:3] /= im[:,:,3:] + 1e-8
@@ -118,8 +162,9 @@ class EvalDataset(Dataset):
         image_512 = self.to_tensor(image_512)
         image = self.to_tensor(image)
         return {
-            'name': img_name,
+            'name': img_path.stem,
             'img': image.unsqueeze(0),
+            'ori_img': im,
             'img_512': image_512.unsqueeze(0),
             'calib': calib.unsqueeze(0),
             'calib_world': calib_world.unsqueeze(0),
