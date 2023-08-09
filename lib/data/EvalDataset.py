@@ -115,8 +115,8 @@ class EvalDataset(Dataset):
         img_path: Path = self.img_files[index]
         rect_path = img_path.parent / (img_path.stem + '_rect.txt')
 
-        # im = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
-        im = np.array(Image.open(img_path).convert('RGB'))
+        im = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+        # im = np.array(Image.open(img_path).convert('RGB'))
         if im.shape[2] == 4:
             im = im / 255.0
             im[:,:,:3] /= im[:,:,3:] + 1e-8
